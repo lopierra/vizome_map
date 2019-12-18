@@ -1,0 +1,88 @@
+---
+title: "Map figure for ITCR educational resource grant"
+author: "Pierrette Lo"
+date: "12/16/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(fiftystater)
+library(viridis)
+```
+
+
+*** Same networks as U24 but different partners that Shannon sent me ***
+
+
+Read in data
+```{r}
+data <- readxl::read_xlsx("centers_edu.xlsx")
+point_data <- readxl::read_xlsx("partner_coords_edu.xlsx")
+```
+
+Clean up center data
+```{r}
+# make lookup table to convert state abbs to names from {state} dataset
+# add dc from {fifty_states} (not contained in {state}) 
+state_lookup <- data.frame(state.abb, state = tolower(state.name), stringsAsFactors = F) %>% 
+  rbind(c("DC", "district of columbia"))
+
+# add full state names to centers
+centers <- data %>% 
+  left_join(state_lookup, by = c("state_abb" = "state.abb"))
+
+# lowercase center names for consistency
+centers$center <- tolower(centers$center)
+```
+
+Version 2: keep states with 0 centers separate so they can be grey
+```{r}
+mapdata2 <- centers %>%
+  distinct(center, .keep_all = T) %>% 
+  group_by(state) %>% 
+  summarize(center_count = n()) %>% 
+  ungroup()
+
+zero_states <- state_lookup %>% 
+  anti_join(mapdata2, by = "state")
+```
+
+Add state counts to point data
+```{r}
+point_data <- point_data %>% 
+  add_count(state_abb)
+```
+
+Version 2 map: zero_states are grey (easier to see)
+```{r}
+  ggplot() +
+  geom_map(data = mapdata2,
+           aes(map_id = state, fill = center_count), 
+           map = fifty_states, color = "white") +
+  geom_map(data = zero_states,
+           aes(map_id = state),
+           map = fifty_states, 
+           fill = "lightgrey",
+           color = "white") +
+  geom_point(data = point_data, 
+             aes(x = long, y = lat, size = n), 
+             shape = 21, fill = "darkorange") +
+  expand_limits(x = fifty_states$long, y = fifty_states$lat) +
+  coord_map() +
+  scale_fill_viridis(breaks = c(1, 7, 13), 
+                     name = "Network centers\nper state\n(grey = 0)") +
+  scale_x_continuous(breaks = NULL) + 
+  scale_y_continuous(breaks = NULL) +
+  scale_size_continuous(breaks = c(1, 2), 
+                        range = c(3,5), 
+                        name = "Collaborators\nper state") +
+  labs(x = NULL, y = NULL) +
+  theme(panel.background = element_blank(),
+        plot.caption = element_text(hjust = 0.5, size = 10))
+
+ggsave("map_edu.png", height = 5, width = 9)
+```
+

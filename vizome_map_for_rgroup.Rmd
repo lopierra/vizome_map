@@ -1,0 +1,244 @@
+---
+title: "Making a Simple Map"
+author: "Pierrette Lo"
+date: "11/21/2019"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(fiftystater)
+library(viridis)
+```
+
+## Background on mapping in R
+
+There's a whole field of data science around geospatial analysis using GIS (geographic information systems).
+
+Examples - weather patterns, real estate prices, crime incidence, etc.
+
+At its core, a map in R is just a plot of latitude vs longitude.
+
+Mapping uses "shapefiles" - predetermined collections of coordinates indicating boundaries of things like states, counties, neighbourhoods, voting districts, etc.
+
+If you want to do "real" geospatial analysis, use {ggmap} package. It can pull in map data from Google Maps and other services and make them look nice.
+
+* Source: https://github.com/dkahle/ggmap
+* A good tutorial: https://www.littlemissdata.com/blog/maps
+* Short example I did for a previous project: https://github.com/lopierra/biketown
+
+For our recent grant application, I just needed to make a simple map of US states, so I used the {fiftystater} package, which is a bit easier to learn than {ggmap}.
+
+* Source: https://github.com/wmurphyrd/fiftystater
+* It's basically just a dataframe of lat/long coordinates for state boundaries, plus some additional metadata to create a map of the US.
+
+## Background on my project
+
+Part of this grant was about disseminating Vizome to the cancer research community for increased adoption.
+
+We wanted to create some sort of map that would show our range of influence across the country through our membership in various NCI and other networks.
+
+Rather than trying to manually draw things on a map, it seemed like R would be the quickest and easiest solution. I had already used {fiftystater} for something similar, so I went with that.
+
+First step was to envision what I wanted:
+
+* States colored by number of network member centers in each
+* Specific points showing locations of our actual collaborators on the grant
+
+## Data collection and Excel cleaning
+
+**1. Center data**
+
+I started by putting together an Excel sheet of all of the members of the networks we participate in, and what state they're in.
+I basically just copied and pasted from the following sources:
+
+- U54 DSRN: https://ncihub.org/groups/drsn
+- CTD2: https://ocg.cancer.gov/programs/ctd2/centers
+- CTSA (CD2H): https://ncats.nih.gov/files/ctsa-funding-information.pdf
+  - click on Hub awards for 2019 (60 UL1 awards), export from NIH RePORTER
+- NCI-Designated Cancer Centers (CI4CC): https://cancercenters.cancer.gov/Center/CCList
+
+**2. Collaborator data**
+
+I also put together a separate sheet with the coordinates for our collaborators.
+
+* Since there weren't very many, I just looked them up on Google Maps (right click -> "What's here?") and then copied & pasted the lat/long info.
+* With a longer list, there are probably better ways to do this, like maybe with ggmap or doing some sort of web scraping, but I had to balance the amount of time spent learning how to automate something with the time it would take to just do it.
+
+<br>
+
+![](https://imgs.xkcd.com/comics/automation.png)
+
+<br>
+
+Similarly, since my dataset is very small and I can read pretty fast, I did a bunch of cleaning directly in Excel since I didn't have time to figure it out in R:
+
+* Manually type in state for each center
+* Many centers appeared more than once but with slightly different names -> sort by name, pick one spelling (didn't matter which) and copy & paste so all are the same 
+
+## Data wrangling in R
+
+Read in center and collaborator location data using {readxl}
+```{r}
+data <- readxl::read_xlsx("centers.xlsx")
+point_data <- readxl::read_xlsx("partner_coords.xlsx")
+```
+
+Clean up center data:
+
+* {fiftystater} refers to states using their full name, all lowercase (e.g. "oregon")
+* My dataset contains two-letter state abbreviations, so I need to convert them all to lowercase state names
+* `state` is a dataset built into R (like `iris` or `mtcars`)
+* I used `state` to make a lookup table containing state names (`state.name`) and abbreviations (`state.abb`)
+* I also added a custom row for DC, since it's not in the `state` dataset
+```{r}
+state_lookup <- data.frame(state.abb, 
+                           state = tolower(state.name), 
+                           stringsAsFactors = F) %>% 
+  rbind(c("DC", "district of columbia"))
+```
+
+Then I used the lookup table to add full state names to my centers dataframe
+```{r}
+centers <- data %>% 
+  left_join(state_lookup, by = c("state_abb" = "state.abb"))
+
+# make center names lowercase for consistency
+centers$center <- tolower(centers$center)
+```
+
+## Format data for mapping:
+
+Center data:
+
+*First remove the duplicate centers (some centers are in more than one network, but we only wanted to plot unique centers per state)
+* Also add count of centers for each state (includes both network members and collaborators)
+```{r}
+mapdata <- centers %>%
+  distinct(center, .keep_all = T) %>% 
+  group_by(state) %>% 
+  summarize(center_count = n()) %>% 
+  ungroup()
+```
+
+Next - some states don't have any data (because they don't have any centers - e.g. alaska). If dataset is used as is, those states will just be holes in the map.
+
+So you need to add rows for those states (use `right_join()` so you get all the rows in `mapdata` PLUS all the rows in `state`)
+```{r}
+mapdata <- mapdata %>% 
+  right_join(state_lookup, by = "state")
+```
+
+New state rows have center_count = NA, so you next need to replace them with 0
+```{r}
+mapdata$center_count <- replace_na(mapdata$center_count, 0)
+```
+
+Collaborator data:
+
+* We don't need state names for the collaborator data, since we'll just plot those points on the map.
+* We do need to count the number of collaborators per state so we can size the points accordingly. 
+* Some of the points are really close together (e.g. OHSU and PSU), so they're not discernible with the small size of the final figure. I decided to just make those points bigger so it's easier to tell that there's more than one. (Could also have grouped them by city, but again, short on time)
+* (`add_count()` is a handy shortcut that wraps `group_by()` and `mutate()` to add a column of counts)
+```{r}
+point_data <- point_data %>% 
+  add_count(state_abb)
+```
+
+## Plotting, version 1
+
+Again, this is basically just a big plot of latitude & longitude
+
+`geom_map()` reads the shape coordinates from a reference map
+
+* map = the reference map (in this case, `fifty_states` from the {fiftystater} package) 
+* map_id = the column in your dataset that refers to the reference map shapes
+
+`coord_map()` scales the plot so it looks like the map projections we're used to seeing (curvature of earth, etc.)
+
+```{r}
+mapdata %>% 
+  ggplot() +
+  geom_map(aes(map_id = state, fill = center_count), 
+           map = fifty_states, color = "white") +
+  geom_point(data = point_data, 
+             aes(x = long, y = lat, size = n), 
+             shape = 21, fill = "darkorange") +
+  expand_limits(x = fifty_states$long, y = fifty_states$lat) +
+  coord_map() +
+  scale_fill_viridis(breaks = c(0, 5, 10, 15), 
+                     name = "Network centers\nper state") +
+  scale_x_continuous(breaks = NULL) + 
+  scale_y_continuous(breaks = NULL) +
+  scale_size_continuous(breaks = c(1, 2), 
+                        range = c(3,5), 
+                        name = "Collaborators\nper state") +
+  labs(x = NULL, y = NULL) +
+  theme(panel.background = element_blank(),
+        plot.caption = element_text(hjust = 0.5, size = 10))
+
+# ggsave("vizome_map.png", height = 5, width = 9)
+```
+
+## Plotting, version 2
+
+It's hard to emphasize the states where we have influence when the states with no centers are also colored.
+
+So in this version, I kept the states with 0 centers in a separate dataframe so I can color them grey in the plot.
+
+First I did the same as above to get center_count for each state:
+```{r}
+mapdata2 <- centers %>%
+  distinct(center, .keep_all = T) %>% 
+  group_by(state) %>% 
+  summarize(center_count = n()) %>% 
+  ungroup()
+```
+
+Then instead of filling in the states with no data, I created a separate dataframe with those states.
+
+I don't need counts for these because I'm not looking to fill based on count - I just need them to show up.
+```{r}
+zero_states <- state_lookup %>% 
+  anti_join(mapdata2, by = "state")
+```
+
+Now I plot two `geom_map()` layers:
+
+* one for the states with centers, filled according to center count, same as above
+* another layer with the zero-count states, all colored grey (outside of `aes()` because not linked to data)
+```{r}
+  ggplot() +
+  geom_map(data = mapdata2,
+           aes(map_id = state, fill = center_count), 
+           map = fifty_states, color = "white") +
+  geom_map(data = zero_states,
+           aes(map_id = state),
+           map = fifty_states, 
+           fill = "lightgrey",
+           color = "white") +
+  geom_point(data = point_data, 
+             aes(x = long, y = lat, size = n), 
+             shape = 21, fill = "darkorange") +
+  expand_limits(x = fifty_states$long, y = fifty_states$lat) +
+  coord_map() +
+  scale_fill_viridis(breaks = c(1, 7, 13), 
+                     name = "Network centers\nper state\n(grey = 0)") +
+  scale_x_continuous(breaks = NULL) + 
+  scale_y_continuous(breaks = NULL) +
+  scale_size_continuous(breaks = c(1, 2), 
+                        range = c(3,5), 
+                        name = "Collaborators\nper state") +
+  labs(x = NULL, y = NULL) +
+  theme(panel.background = element_blank(),
+        plot.caption = element_text(hjust = 0.5, size = 10))
+
+# ggsave("vizome_map_withgrey.png", height = 5, width = 9)
+```
+
